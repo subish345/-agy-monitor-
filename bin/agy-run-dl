@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""
+AGY Download Runner — Registers a download, launches the dashboard terminal
+if needed, runs the download command, and manages the lifecycle of the active registry.
+
+Usage:
+  agy-run-dl --app "App Name" --desc "Description" --source "Source Repo" --type "flatpak|apt|pip|generic" -- <command>
+"""
+
+import sys
+import os
+import json
+import uuid
+import time
+import subprocess
+import argparse
+
+ACTIVE_DIR = os.path.expanduser("~/Documents/agy-agent/downloads/active")
+LOGS_DIR = os.path.expanduser("~/Documents/agy-agent/logs")
+PID_FILE = os.path.expanduser("~/Documents/agy-agent/downloads/monitor.pid")
+
+
+def is_monitor_running():
+    """Verify if the agy-monitor process is active using the PID file."""
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, 'r') as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)  # checks if PID is active
+            return True
+        except (ValueError, OSError):
+            pass
+    return False
+
+
+def launch_monitor():
+    """Start agy-monitor in a new desktop terminal window if it isn't running."""
+    if is_monitor_running():
+        return
+
+    # Check for terminal emulators
+    # Zorin OS has x-terminal-emulator which points to gnome-terminal
+    cmd = [
+        "gnome-terminal", "--tab", "--", "bash", "-c",
+        "python3 ~/Documents/agy-agent/bin/agy-monitor.py; read"
+    ]
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception:
+        # Fallback to x-terminal-emulator
+        try:
+            subprocess.Popen([
+                "x-terminal-emulator", "-e", "bash", "-c",
+                "python3 ~/Documents/agy-agent/bin/agy-monitor.py; read"
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except Exception as e:
+            print(f"Error launching terminal window: {e}", file=sys.stderr)
+
+
+def main():
+    # Split arguments at '--' to get options vs command
+    if '--' not in sys.argv:
+        print("Usage: agy-run-dl [options] -- <command>", file=sys.stderr)
+        print("Options: --app <name> --desc <desc> --source <source> --type <type>", file=sys.stderr)
+        sys.exit(1)
+
+    idx = sys.argv.index('--')
+    opt_args = sys.argv[1:idx]
+    cmd_args = sys.argv[idx+1:]
+
+    if not cmd_args:
+        print("No command specified after '--'", file=sys.stderr)
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(description="AGY Download Runner")
+    parser.add_argument("--app", required=True, help="App Name")
+    parser.add_argument("--desc", default="No description", help="App Description")
+    parser.add_argument("--source", default="Unknown Source", help="Source Repo / URL")
+    parser.add_argument("--type", choices=["apt", "pip", "flatpak", "generic"], default="generic", help="Parser Type")
+    parser.add_argument("--log", help="Custom log file path")
+
+    args = parser.parse_args(opt_args)
+
+    # Setup directories
+    os.makedirs(ACTIVE_DIR, exist_ok=True)
+    os.makedirs(LOGS_DIR, exist_ok=True)
+
+    # Unique task context
+    task_id = str(uuid.uuid4())[:8]
+    log_file = args.log or os.path.join(LOGS_DIR, f"task_{task_id}.log")
+
+    # Write registry JSON
+    registry_data = {
+        "task_id": task_id,
+        "app_name": args.app,
+        "description": args.desc,
+        "source": args.source,
+        "type": args.type,
+        "log_file": log_file,
+        "started_at": time.time(),
+        "linger": 0
+    }
+    registry_file = os.path.join(ACTIVE_DIR, f"{task_id}.json")
+    with open(registry_file, 'w') as f:
+        json.dump(registry_data, f, indent=2)
+
+    # Ensure log file exists
+    with open(log_file, 'w') as f:
+        f.write(f"=== Starting Download Task for {args.app} ===\n")
+        f.write(f"Command: {' '.join(cmd_args)}\n\n")
+
+    # Launch GUI terminal monitor if necessary
+    launch_monitor()
+
+    # Run the command and redirect logs
+    print(f"⚡ Starting task: {args.app} (ID: {task_id})")
+    print(f"📝 Logging to: {log_file}")
+    
+    try:
+        with open(log_file, 'a') as lf:
+            process = subprocess.Popen(
+                cmd_args,
+                stdout=lf,
+                stderr=lf,
+                text=True,
+                bufsize=1
+            )
+            process.wait()
+            
+        exit_code = process.returncode
+        if exit_code == 0:
+            print(f"✓ Task completed successfully: {args.app}")
+        else:
+            print(f"✗ Task failed with exit code {exit_code}: {args.app}")
+            
+    except Exception as e:
+        with open(log_file, 'a') as lf:
+            lf.write(f"\n[Runner Error]: {e}\n")
+        print(f"✗ Runner encountered error: {e}", file=sys.stderr)
+        
+    finally:
+        # Give monitor 10 seconds to read completion status, then clean up
+        time.sleep(10)
+        if os.path.exists(registry_file):
+            try:
+                os.remove(registry_file)
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    main()

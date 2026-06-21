@@ -1,0 +1,7 @@
+#!/bin/bash
+# AGY Chat Saver launcher
+# Usage: agy-save-chat save <conv-id> [--label "description"]
+#        agy-save-chat list
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$SCRIPT_DIR/agy-save-chat.py" "$@"

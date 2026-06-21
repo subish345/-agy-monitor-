@@ -1,0 +1,6 @@
+#!/bin/bash
+# AGY Download Monitor launcher
+# Usage: agy-monitor <logfile> [--type apt|pip|generic]
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$SCRIPT_DIR/agy-monitor.py" "$@"
