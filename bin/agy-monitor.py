@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 AGY Download Monitor — A premium, highly readable terminal-based live download dashboard.
-Supports monitoring up to 5 concurrent downloads in a split terminal card layout.
+Supports monitoring up to 5 concurrent downloads in a split terminal card layout,
+and always displays the persistent download history at the bottom.
 
 Features:
   • Responsive card layout (adapts to panel height and terminal size)
   • Boxed panels with neat unicode corners (┌ ┐ └ ┘ ─ │)
   • High-contrast color palette with clear status indicators
-  • Shows application name, description, source, and detailed metadata
+  • Displays active app info (name, description, source, and detailed metadata)
+  • Persistent history table displaying completed/failed downloads
   • Animated progress bars, speed tracker, ETA calculation, and live log snippets
   • Supports: flatpak, apt, pip, npm, wget, curl, snap, and generic downloads
 """
@@ -25,6 +27,7 @@ from datetime import datetime
 # Path definitions
 ACTIVE_DIR = os.path.expanduser("~/Documents/agy-agent/downloads/active")
 PID_FILE = os.path.expanduser("~/Documents/agy-agent/downloads/monitor.pid")
+HISTORY_FILE = os.path.expanduser("~/Documents/agy-agent/downloads/history.json")
 
 # ─── Progress Parsers ───────────────────────────────────────────────────────
 
@@ -312,6 +315,80 @@ def get_status_info(status):
     return mapping.get(status, ("●", 1, status.upper()))
 
 
+def draw_history(stdscr, y, cx, width, height, history_data):
+    """Draw the download history table at the bottom of the screen."""
+    try:
+        # Border
+        stdscr.addstr(y, cx, "┌" + "─" * (width - 2) + "┐", curses.color_pair(7))
+        stdscr.addstr(y, cx + 2, " 📜 Download History ", curses.color_pair(6) | curses.A_BOLD)
+        
+        for line_offset in range(1, height - 1):
+            stdscr.addstr(y + line_offset, cx, "│", curses.color_pair(7))
+            stdscr.addstr(y + line_offset, cx + width - 1, "│", curses.color_pair(7))
+            
+        stdscr.addstr(y + height - 1, cx, "└" + "─" * (width - 2) + "┘", curses.color_pair(7))
+    except curses.error:
+        pass
+
+    headers_y = y + 1
+    # Col widths sum = 24 + 14 + 20 + 10 + 10 + 10 = 88. With spaces = 98
+    col_widths = [24, 14, 20, 10, 10, 10]
+    col_names = ["App Name", "Source", "Started At", "Size", "Elapsed", "Status"]
+
+    # Table Header Line
+    curr_x = cx + 2
+    try:
+        for name, w in zip(col_names, col_widths):
+            stdscr.addstr(headers_y, curr_x, name.ljust(w)[:w], curses.color_pair(10) | curses.A_BOLD)
+            curr_x += w + 2
+        stdscr.addstr(headers_y + 1, cx + 1, "─" * (width - 2), curses.color_pair(7) | curses.A_DIM)
+    except curses.error:
+        pass
+
+    # Table Data Rows
+    max_rows = height - 4
+    if max_rows <= 0:
+        return
+        
+    rows = history_data[-max_rows:]
+    rows.reverse()  # Latest first
+
+    for row_idx, entry in enumerate(rows):
+        ry = headers_y + 2 + row_idx
+        if ry >= y + height - 1:
+            break
+
+        app = entry.get("app_name", "--")
+        src = entry.get("source", "--")
+        start = entry.get("started_at", "--")
+        sz = entry.get("size", "--")
+        el = entry.get("elapsed", "--")
+        stat = entry.get("status", "complete").upper()
+
+        color = 4 if stat == "COMPLETE" else 5
+
+        curr_x = cx + 2
+        try:
+            stdscr.addstr(ry, curr_x, app.ljust(col_widths[0])[:col_widths[0]], curses.color_pair(1))
+            curr_x += col_widths[0] + 2
+            
+            stdscr.addstr(ry, curr_x, src.ljust(col_widths[1])[:col_widths[1]], curses.color_pair(10))
+            curr_x += col_widths[1] + 2
+            
+            stdscr.addstr(ry, curr_x, start.ljust(col_widths[2])[:col_widths[2]], curses.color_pair(10))
+            curr_x += col_widths[2] + 2
+            
+            stdscr.addstr(ry, curr_x, sz.ljust(col_widths[3])[:col_widths[3]], curses.color_pair(1))
+            curr_x += col_widths[3] + 2
+            
+            stdscr.addstr(ry, curr_x, el.ljust(col_widths[4])[:col_widths[4]], curses.color_pair(1))
+            curr_x += col_widths[4] + 2
+            
+            stdscr.addstr(ry, curr_x, stat.ljust(col_widths[5])[:col_widths[5]], curses.color_pair(color) | curses.A_BOLD)
+        except curses.error:
+            pass
+
+
 # ─── Curses UI Main loop ────────────────────────────────────────────────────
 
 def main_loop(stdscr):
@@ -357,17 +434,25 @@ def main_loop(stdscr):
                     except Exception:
                         pass
 
-        # Sort by started_at or filename
+        # Sort active downloads
         active_files.sort(key=lambda x: x[1].get('started_at', x[0]))
         active_files = active_files[:5]  # limit to 5 active panels
+
+        # Load history
+        history_data = []
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, 'r') as hf:
+                    history_data = json.load(hf)
+            except Exception:
+                pass
 
         stdscr.erase()
 
         # Premium top header
-        title_str = " ⚡ AGY DOWNLOAD MANAGER "
-        desc_str = " Active Jobs: {} │ Q: Exit ".format(len(active_files))
+        title_str = " ⚡ AGY DOWNLOAD MONITOR "
+        desc_str = " Active: {} │ History: {} │ Q: Exit ".format(len(active_files), len(history_data))
         try:
-            # Main border frame
             stdscr.addstr(0, 0, "┌" + "─" * (width - 2) + "┐", curses.color_pair(7))
             stdscr.addstr(1, 0, "│" + " " * (width - 2) + "│", curses.color_pair(7))
             stdscr.addstr(1, 2, title_str, curses.color_pair(6) | curses.A_BOLD)
@@ -376,21 +461,26 @@ def main_loop(stdscr):
         except curses.error:
             pass
 
-        if not active_files:
-            msg = "No active downloads registered. Waiting for jobs..."
-            try:
-                stdscr.addstr(height // 2, (width - len(msg)) // 2, msg, curses.color_pair(10) | curses.A_ITALIC)
-                stdscr.addstr(height - 1, 0, "└" + "─" * (width - 2) + "┘", curses.color_pair(7))
-            except curses.error:
-                pass
-            stdscr.refresh()
-            continue
+        card_w = max(100, min(width - 4, 116))
+        cx = max(2, (width - card_w) // 2)
 
-        # Render split panels with beautiful boxes
-        avail_h = height - 4  # subtract header (3) and footer (1)
-        panel_h = avail_h // len(active_files)
+        # Dynamic Sizing Calculations
+        avail_h = height - 4  # available height excluding header/footer
+        
+        if len(active_files) > 0:
+            # Split height between active panels and history box
+            # Reserve at least 6 lines for history box
+            history_h = max(5, min(avail_h // 3, 10))
+            active_h = avail_h - history_h
+            panel_h = active_h // len(active_files)
+        else:
+            # No active downloads -> history takes all available height
+            history_h = avail_h
+            panel_h = 0
+
         y_offset = 3
 
+        # 1. Render Active Downloads split panels
         for idx, (entry_file, meta) in enumerate(active_files):
             task_id = meta.get('task_id', entry_file.replace('.json', ''))
             log_path = meta.get('log_file', '')
@@ -399,7 +489,6 @@ def main_loop(stdscr):
             desc = meta.get('description', 'No description provided')
             ptype = meta.get('type', 'generic')
 
-            # Initialize trackers/parsers for this task if new
             if task_id not in trackers:
                 trackers[task_id] = SpeedTracker()
                 parsers[task_id] = PARSERS.get(ptype, GenericParser)()
@@ -407,7 +496,6 @@ def main_loop(stdscr):
             tracker = trackers[task_id]
             parser = parsers[task_id]
 
-            # Read log content
             content = ""
             if os.path.exists(log_path):
                 try:
@@ -416,56 +504,44 @@ def main_loop(stdscr):
                 except Exception:
                     pass
 
-            # Parse details
             progress = parser.parse(content)
             tracker.update(progress["overall_percent"])
 
-            # Status and progress bar variables
             pct = progress["overall_percent"]
             status_sym, color_pair, status_label = get_status_info(progress["status"])
             
-            # Auto-cleanup complete downloads after a 10s linger
             if progress["status"] == "complete":
                 meta['linger'] = meta.get('linger', 0) + 1
-                if meta['linger'] > 40:  # 40 ticks = 10s
+                if meta['linger'] > 40:
                     try:
                         os.remove(os.path.join(ACTIVE_DIR, entry_file))
                     except Exception:
                         pass
 
-            # Compute panel box layout coordinates
             py = y_offset + idx * panel_h
-            ph = panel_h - 1  # inner height of box
+            ph = panel_h - 1
 
-            card_w = min(width - 4, 116)
-            cx = max(2, (width - card_w) // 2)
-
-            # Draw card border
+            # Card border frame
             try:
-                # Top edge with app name
                 header_title = " 📦 {} (Source: {}) ".format(app_name, source)
                 stdscr.addstr(py, cx, "┌" + "─" * (card_w - 2) + "┐", curses.color_pair(7))
                 stdscr.addstr(py, cx + 2, header_title, curses.color_pair(6) | curses.A_BOLD)
 
-                # Draw vertical sides
                 for line_offset in range(1, ph):
                     if py + line_offset < height - 1:
                         stdscr.addstr(py + line_offset, cx, "│", curses.color_pair(7))
                         stdscr.addstr(py + line_offset, cx + card_w - 1, "│", curses.color_pair(7))
 
-                # Bottom edge
                 if py + ph < height - 1:
                     stdscr.addstr(py + ph, cx, "└" + "─" * (card_w - 2) + "┘", curses.color_pair(7))
             except curses.error:
                 pass
 
-            # Draw Content (Responsive based on panel height)
             col_inner_w = card_w - 4
             content_x = cx + 2
 
             if ph >= 5:
-                # Layout for larger panel size
-                # Line 1: Status Banner
+                # Full details layout
                 status_str = "{} Status: {} │ Progress: {}%".format(status_sym, status_label, pct)
                 try:
                     stdscr.addstr(py + 1, content_x, status_str, curses.color_pair(color_pair) | curses.A_BOLD)
@@ -473,7 +549,6 @@ def main_loop(stdscr):
                 except curses.error:
                     pass
 
-                # Line 2: Progress bar & stats
                 bar_w = col_inner_w - 44
                 draw_progress_bar(stdscr, py + 2, content_x, bar_w, pct, color_pair)
 
@@ -487,7 +562,6 @@ def main_loop(stdscr):
                 except curses.error:
                     pass
 
-                # Line 3: Log preview
                 log_snippet = progress.get('log_lines', [])
                 if log_snippet and py + 3 < py + ph:
                     latest_line = log_snippet[-1]
@@ -495,10 +569,8 @@ def main_loop(stdscr):
                         stdscr.addstr(py + 3, content_x, "💬 Log: {}".format(latest_line[:col_inner_w - 8]), curses.color_pair(10))
                     except curses.error:
                         pass
-
             elif ph >= 3:
-                # Compact Layout (smaller panels)
-                # Line 1: Combine Status, Percent and Progress Bar
+                # Compact layout
                 status_str = "{} {} ({}%) ".format(status_sym, status_label, pct)
                 try:
                     stdscr.addstr(py + 1, content_x, status_str, curses.color_pair(color_pair) | curses.A_BOLD)
@@ -521,12 +593,17 @@ def main_loop(stdscr):
                 except curses.error:
                     pass
             else:
-                # Ultra compact (minimal line)
+                # Ultra compact line
                 status_line = "{} {} │ Progress: {}% │ Speed: {}".format(status_sym, app_name, pct, progress.get('speed') or "--")
                 try:
                     stdscr.addstr(py + 1, content_x, status_line[:col_inner_w], curses.color_pair(color_pair))
                 except curses.error:
                     pass
+
+        # 2. Render History panel at the bottom
+        hy = y_offset + len(active_files) * panel_h
+        if hy + history_h < height:
+            draw_history(stdscr, hy, cx, card_w, history_h, history_data)
 
         # Global Bottom Border
         try:
@@ -536,7 +613,7 @@ def main_loop(stdscr):
 
         stdscr.refresh()
 
-    # Clear PID file upon exit
+    # Clear PID
     if os.path.exists(PID_FILE):
         try:
             os.remove(PID_FILE)

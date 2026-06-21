@@ -2,6 +2,7 @@
 """
 AGY Download Runner — Registers a download, launches the dashboard terminal
 if needed, runs the download command, and manages the lifecycle of the active registry.
+Also writes completed/failed jobs to the persistent download history.
 
 Usage:
   agy-run-dl --app "App Name" --desc "Description" --source "Source Repo" --type "flatpak|apt|pip|generic" -- <command>
@@ -12,12 +13,15 @@ import os
 import json
 import uuid
 import time
+import re
 import subprocess
 import argparse
+from datetime import datetime
 
 ACTIVE_DIR = os.path.expanduser("~/Documents/agy-agent/downloads/active")
 LOGS_DIR = os.path.expanduser("~/Documents/agy-agent/logs")
 PID_FILE = os.path.expanduser("~/Documents/agy-agent/downloads/monitor.pid")
+HISTORY_FILE = os.path.expanduser("~/Documents/agy-agent/downloads/history.json")
 
 
 def is_monitor_running():
@@ -39,7 +43,6 @@ def launch_monitor():
         return
 
     # Check for terminal emulators
-    # Zorin OS has x-terminal-emulator which points to gnome-terminal
     cmd = [
         "gnome-terminal", "--tab", "--", "bash", "-c",
         "python3 ~/Documents/agy-agent/bin/agy-monitor.py; read"
@@ -57,8 +60,15 @@ def launch_monitor():
             print(f"Error launching terminal window: {e}", file=sys.stderr)
 
 
+def format_time(seconds):
+    if seconds <= 0:
+        return "--"
+    if seconds > 3600:
+        return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
+    return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+
+
 def main():
-    # Split arguments at '--' to get options vs command
     if '--' not in sys.argv:
         print("Usage: agy-run-dl [options] -- <command>", file=sys.stderr)
         print("Options: --app <name> --desc <desc> --source <source> --type <type>", file=sys.stderr)
@@ -81,15 +91,12 @@ def main():
 
     args = parser.parse_args(opt_args)
 
-    # Setup directories
     os.makedirs(ACTIVE_DIR, exist_ok=True)
     os.makedirs(LOGS_DIR, exist_ok=True)
 
-    # Unique task context
     task_id = str(uuid.uuid4())[:8]
     log_file = args.log or os.path.join(LOGS_DIR, f"task_{task_id}.log")
 
-    # Write registry JSON
     registry_data = {
         "task_id": task_id,
         "app_name": args.app,
@@ -104,18 +111,16 @@ def main():
     with open(registry_file, 'w') as f:
         json.dump(registry_data, f, indent=2)
 
-    # Ensure log file exists
     with open(log_file, 'w') as f:
         f.write(f"=== Starting Download Task for {args.app} ===\n")
         f.write(f"Command: {' '.join(cmd_args)}\n\n")
 
-    # Launch GUI terminal monitor if necessary
     launch_monitor()
 
-    # Run the command and redirect logs
     print(f"⚡ Starting task: {args.app} (ID: {task_id})")
     print(f"📝 Logging to: {log_file}")
     
+    exit_code = -1
     try:
         with open(log_file, 'a') as lf:
             process = subprocess.Popen(
@@ -139,6 +144,42 @@ def main():
         print(f"✗ Runner encountered error: {e}", file=sys.stderr)
         
     finally:
+        # Save to history
+        try:
+            history = []
+            if os.path.exists(HISTORY_FILE):
+                with open(HISTORY_FILE, 'r') as hf:
+                    history = json.load(hf)
+            
+            # Simple size detection from log file
+            size_str = "--"
+            if os.path.exists(log_file):
+                with open(log_file, 'r', errors='ignore') as lf:
+                    log_content = lf.read()
+                # Find size patterns like "96.3 MB" or "1024 kB" or "Downloaded: 50MB"
+                size_matches = re.findall(r'(\d+(?:\.\d+)?\s*(?:[kMG]B|MB|KB|GB))', log_content)
+                if size_matches:
+                    # Choose the largest size pattern matching total size in download
+                    size_str = size_matches[-1]
+
+            elapsed_sec = time.time() - registry_data["started_at"]
+            history_entry = {
+                "app_name": args.app,
+                "source": args.source,
+                "type": args.type,
+                "started_at": datetime.fromtimestamp(registry_data["started_at"]).strftime("%Y-%m-%d %H:%M:%S"),
+                "status": "complete" if exit_code == 0 else "failed",
+                "size": size_str,
+                "elapsed": format_time(elapsed_sec)
+            }
+            history.append(history_entry)
+            history = history[-50:]  # Limit to 50 records
+            
+            with open(HISTORY_FILE, 'w') as hf:
+                json.dump(history, hf, indent=2)
+        except Exception as he:
+            print(f"Error saving download history: {he}", file=sys.stderr)
+
         # Give monitor 10 seconds to read completion status, then clean up
         time.sleep(10)
         if os.path.exists(registry_file):
